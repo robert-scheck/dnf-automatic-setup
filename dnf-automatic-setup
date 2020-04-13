@@ -1,0 +1,233 @@
+#!/bin/bash
+#
+#  dnf-automatic-setup 0.0.1
+#
+#  (c) 2019-2020 by Robert Scheck <robert@fedoraproject.org>
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU General Public License
+#  version 2 only, as published by the Free Software Foundation.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+#  02110-1301, USA.
+#
+
+LANG=C
+
+self="$(basename "$0")"
+config="/etc/dnf/automatic.conf"
+timer="/etc/systemd/system/dnf-automatic.timer.d/dnf-automatic-setup.conf"
+service="/etc/systemd/system/dnf-automatic.service.d/dnf-automatic-setup.conf"
+
+usage()
+{
+  echo "Usage: ${self} [OPTIONS]"
+  echo ""
+  echo "Tiny imperfect assistant to configure automated dnf upgrades, but provides"
+  echo "the functionality the dnf community failed to provide since at least 2014."
+  echo ""
+  echo "  -i                            Interactive setup"
+  echo "  -a <none|download|install>    Perform selected update activity (or none)"
+  echo "  -m alice@example.net          Mail notification after download or install"
+  echo "  -r                            Reboot after installing updates (if needed)"
+  echo "  -s 'Mon..Sun *-*-* 01:00:00'  Schedule for downloading/installing updates"
+  echo "  -h                            Print this help and exit"
+  echo ""
+  echo "See also dnf-automatic(8) and needs-restarting(1) for further information."
+  exit 1
+}
+
+error()
+{
+  echo "Error: $1"
+  exit 1
+}
+
+if [ $# -ne 0 ]; then
+  while getopts ia:rs:m:h-? options; do
+    case "${options}" in
+      i) interactive=1 ;;
+      a) activity="${OPTARG,,}" ;;
+      m) notification="${OPTARG}" ;;
+      r) reboot=1 ;;
+      s) schedule="${OPTARG}" ;;
+      *) usage ;;
+     esac
+  done
+
+  rpm -q dnf-automatic yum-utils >> /dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    echo -n "Installing missing software components..."
+    dnf install dnf-automatic yum-utils -y > /tmp/dnf-automatic-setup.$$ 2>&1
+    if [ $? -eq 0 ]; then
+      echo "done!"
+      echo ""
+      rm -f /tmp/dnf-automatic-setup.$$
+    else
+      echo "failed!"
+      echo ""
+      cat /tmp/dnf-automatic-setup.$$
+      rm -f /tmp/dnf-automatic-setup.$$
+      exit 1
+    fi
+  fi
+
+  if [ ${interactive-0} -eq 1 ]; then
+    [ -n "${activity}" -o -n "${notification}" -o -n "${reboot}" -o -n "${schedule}" ] && error "Can't combine interactive setup with other options!"
+
+    clear
+    echo "${self}"
+    printf "%0.s=" $(seq 1 ${#self})
+    echo -e "\n"
+    echo "Please select one of the following update activities:"
+    echo ""
+    echo "n) No automatic update activities"
+    echo "d) Download available updates only"
+    echo "i) Download and install available updates"
+    echo ""
+
+    while [ "${activity}" != "n" -a "${activity}" != "d" -a "${activity}" != "i" ]; do
+      echo -n "Choice: "
+      read activity
+    done
+
+    if [ "${activity}" != "n" ]; then
+      echo ""
+      echo -n "Mail address for notification after download or install (empty to disable): "
+      read notification
+    fi
+
+    if [ "${activity}" = "i" ]; then
+      echo ""
+      while [ "${reboot}" != "y" -a "${reboot}" != "n" ]; do
+        echo -n "Reboot after installing updates (if needed)? (y/n) "
+        read reboot
+      done
+      [ "${reboot}" = "y" ] && reboot=1 || unset reboot
+    fi
+
+    if [ "${activity}" != "n" ]; then
+      echo ""
+      echo "Please configure a schedule for update activities; examples:"
+      echo " - 'Mon..Sun *-*-* 01:00:00' (daily at 01:00 am, default)"
+      echo " - 'Mon..Fri *-*-* 06:00:00' (business days at 06:00 am)"
+      echo " - 'Mon,Wed,Fri *-*-* 23:30:00' (Mon, Wed, Fri at 11:30 pm)"
+      echo " - 'Sat *-*-* 06:00:00' (Saturdays at 06:00 am)"
+      while [ -z "${schedule}" ]; do
+        echo -n "Schedule (empty for default): "
+        read timetable
+        [ -z "${timetable}" -o "${timetable}" = "default" ] && schedule="Mon..Sun *-*-* 01:00:00" || schedule="${timetable}"
+
+        systemd-analyze calendar "${schedule}" >> /dev/null 2>&1
+        [ $? -ne 0 ] && schedule=""
+      done
+    fi
+  else
+    case "${activity,,}" in
+      none|download|install) ;;
+      "") error "Activity can't be empty!" ;;
+      *) error "Invalid activity '${activity}'!" ;;
+    esac
+    activity="${activity:0:1}"
+
+    if [ "${activity}" = "n" ]; then
+      [ -n "${reboot}" ] && error "There can't be reboots without any update activities!"
+      [ -n "${notification}" ] && error "There can't be notifications without any update activities!"
+      [ -n "${schedule}" ] && error "There can't be schedules without any update activities!"
+    fi
+
+    [ "${activity}" = "d" -a -n "${reboot}" ] && error "There can't be reboots with downloads only!"
+
+    [ -z "${schedule}" -o "${schedule}" = "default" ] && schedule='Mon..Sun *-*-* 01:00:00'
+    if [ -n "${schedule}" ]; then
+      systemd-analyze calendar "${schedule}" >> /dev/null
+      [ $? -ne 0 ] && error "Invalid schedule '${schedule}'!"
+    fi
+  fi
+
+  if [ "${activity}" = "n" ]; then
+    sed -e "/^\\[commands]/,/^\\[/{s/^\\(upgrade_type[[:space:]]*=\\).*/\\1 default/}" \
+      -e "/^\\[commands]/,/^\\[/{s/^\\(random_sleep[[:space:]]*=\\).*/\\1 0/}" \
+      -e "/^\\[commands]/,/^\\[/{s/^\\(download_updates[[:space:]]*=\\).*/\\1 yes/}" \
+      -e "/^\\[commands]/,/^\\[/{s/^\\(apply_updates[[:space:]]*=\\).*/\\1 no/}" \
+      -e "/^\\[emitters]/,/^\\[/{s/^\\(emit_via[[:space:]]*=\\).*/\\1 stdio/}" \
+      -e "/^\\[email]/,/^\\[/{s/^#[[:space:]]*\\(email_from = root@example.com\\)/\\1/}" \
+      -e "/^\\[email]/,/^\\[/{s/^email_to[[:space:]]*=.*/email_to = root/}" \
+      -i "${config}"
+
+    rm -f "${service}" "${timer}"
+    systemctl daemon-reload
+    systemctl disable dnf-automatic.timer >> /dev/null 2>&1
+  else
+    if [ "${activity}" = "d" ]; then
+      sed -e "/^\\[commands]/,/^\\[/{s/^\\(upgrade_type[[:space:]]*=\\).*/\\1 default/}" \
+          -e "/^\\[commands]/,/^\\[/{s/^\\(random_sleep[[:space:]]*=\\).*/\\1 0/}" \
+          -e "/^\\[commands]/,/^\\[/{s/^\\(download_updates[[:space:]]*=\\).*/\\1 yes/}" \
+          -e "/^\\[commands]/,/^\\[/{s/^\\(apply_updates[[:space:]]*=\\).*/\\1 no/}" \
+          -i "${config}"
+    elif [ "${activity}" = "i" ]; then
+      sed -e "/^\\[commands]/,/^\\[/{s/^\\(upgrade_type[[:space:]]*=\\).*/\\1 default/}" \
+          -e "/^\\[commands]/,/^\\[/{s/^\\(random_sleep[[:space:]]*=\\).*/\\1 0/}" \
+          -e "/^\\[commands]/,/^\\[/{s/^\\(download_updates[[:space:]]*=\\).*/\\1 yes/}" \
+          -e "/^\\[commands]/,/^\\[/{s/^\\(apply_updates[[:space:]]*=\\).*/\\1 yes/}" \
+          -i "${config}"
+    fi
+
+    if [ -n "${notification}" ]; then
+      sed -e "/^\\[emitters]/,/^\\[/{s/^\\(emit_via[[:space:]]*=\\).*/\\1 email/}" \
+          -e "/^\\[email]/,/^\\[/{s/^\\(email_from = root@example.com\\)/# \\1/}" \
+          -e "/^\\[email]/,/^\\[/{s/^email_to[[:space:]]*=.*/email_to = ${notification}/}" \
+          -i "${config}"
+    else
+      sed -e "/^\\[emitters]/,/^\\[/{s/^\\(emit_via[[:space:]]*=\\).*/\\1 stdio/}" \
+          -e "/^\\[email]/,/^\\[/{s/^#[[:space:]]*\\(email_from = root@example.com\\)/\\1/}" \
+          -e "/^\\[email]/,/^\\[/{s/^email_to[[:space:]]*=.*/email_to = root/}" \
+          -i "${config}"
+    fi
+
+    if [ -n "${reboot}" ]; then
+      mkdir -p "$(dirname "${service}")"
+      echo "[Service]" > "${service}"
+      echo "ExecStartPost=/bin/bash -c 'needs-restarting --reboothint || shutdown -r +1 \"Reboot is required to fully utilize applied updates\"'" >> "${service}"
+    else
+      rm -f "${service}"
+    fi
+
+    mkdir -p "$(dirname "${timer}")"
+    echo -e "[Timer]\nOnBootSec=\nOnUnitInactiveSec=" > "${timer}"
+    echo "OnCalendar=${schedule}" >> "${timer}"
+
+    systemctl daemon-reload
+    systemctl enable dnf-automatic.timer >> /dev/null 2>&1
+  fi
+else
+  systemctl -q is-enabled dnf-automatic.timer >> /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    grep -q -E '^download_updates[[:space:]]*=[[:space:]]*yes' "${config}" 2> /dev/null
+    [ $? -eq 0 ] && activity="Download available updates only"
+
+    grep -q -E '^apply_updates[[:space:]]*=[[:space:]]*yes' "${config}" 2> /dev/null
+    [ $? -eq 0 ] && activity="Download and install available updates"
+
+    [ -f "${service}" ] && reboot="Yes (if needed)" || reboot="No"
+
+    schedule="$(grep -E '^OnCalendar=' "${timer}" 2> /dev/null)"
+    [ -n "${schedule}" ] && schedule="${schedule/OnCalendar=/}" || schedule="Custom (see: systemctl cat dnf-automatic.timer)"
+
+    if [[ "$(sed -rn '/^\[/{h;d};G;s/^emit_via\s*=\s*(.*)\n\[emitters\]$/\1/p' "${config}" 2> /dev/null)" == *"email"* ]]; then
+      notification="$(sed -rn '/^\[/{h;d};G;s/^email_to\s*=\s*(.*)\n\[email\]$/\1/p' "${config}" 2> /dev/null)"
+    fi
+  fi
+
+  echo "    Activity: ${activity-No automatic update activities}"
+  echo "      Reboot: ${reboot-No}"
+  echo "Notification: ${notification-No mail notification}"
+  echo "    Schedule: ${schedule-No schedule}"
+fi
