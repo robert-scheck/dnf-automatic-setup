@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-#  dnf-automatic-setup 0.0.1
+#  dnf-automatic-setup 0.0.2
 #
-#  (c) 2019-2020 by Robert Scheck <robert@fedoraproject.org>
+#  (c) 2019-2023 by Robert Scheck <robert@fedoraproject.org>
 #
 #  This program is free software; you can redistribute it and/or
 #  modify it under the terms of the GNU General Public License
@@ -40,7 +40,7 @@ usage()
   echo "  -s 'Mon..Sun *-*-* 01:00:00'  Schedule for downloading/installing updates"
   echo "  -h                            Print this help and exit"
   echo ""
-  echo "See also dnf-automatic(8) and needs-restarting(1) for further information."
+  echo "See dnf-automatic(8) and dnf-needs-restarting(1) for further information."
   exit 1
 }
 
@@ -62,10 +62,10 @@ if [ $# -ne 0 ]; then
      esac
   done
 
-  rpm -q dnf-automatic yum-utils >> /dev/null 2>&1
+  rpm -q dnf-automatic >> /dev/null 2>&1
   if [ $? -ne 0 ]; then
     echo -n "Installing missing software components..."
-    dnf install dnf-automatic yum-utils -y > /tmp/dnf-automatic-setup.$$ 2>&1
+    dnf install dnf-automatic -y > /tmp/dnf-automatic-setup.$$ 2>&1
     if [ $? -eq 0 ]; then
       echo "done!"
       echo ""
@@ -195,7 +195,7 @@ if [ $# -ne 0 ]; then
     if [ -n "${reboot}" ]; then
       mkdir -p "$(dirname "${service}")"
       echo "[Service]" > "${service}"
-      echo "ExecStartPost=/bin/bash -c 'needs-restarting --reboothint || shutdown -r +1 \"Reboot is required to fully utilize applied updates\"'" >> "${service}"
+      echo "ExecStartPost=/bin/bash -c 'dnf needs-restarting --reboothint || shutdown -r +1 \"Reboot is required to fully utilize applied updates\"'" >> "${service}"
     else
       rm -f "${service}"
     fi
